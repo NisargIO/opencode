@@ -34,7 +34,7 @@ import * as DateTime from "effect/DateTime"
 import { eq } from "drizzle-orm"
 import { resetDatabase } from "../fixture/db"
 import { disposeAllInstances, provideInstanceEffect, TestInstance, tmpdirScoped } from "../fixture/fixture"
-import { TestLLMServer } from "../lib/llm-server"
+import { raw, TestLLMServer } from "../lib/llm-server"
 import { testProviderConfig } from "../lib/test-provider"
 import { pollWithTimeout, testEffect } from "../lib/effect"
 
@@ -386,6 +386,138 @@ describe("session HttpApi", () => {
         ).toMatchObject([{ type: "assistant" }])
       }),
     { git: true, config: { formatter: false, lsp: false } },
+  )
+
+  for (const scenario of ["unfinished stop", "output limit", "provider error", "completed"]) {
+    it.live(`resumes ${scenario} without changing the user turn`, () =>
+      Effect.gen(function* () {
+        const llm = yield* TestLLMServer
+        yield* llm.text("Recovered", { usage: { input: 1, output: 1 } })
+        const directory = yield* tmpdirScoped({ git: true, config: testProviderConfig(llm.url) })
+        const seeded = yield* Effect.gen(function* () {
+          const sessions = yield* Session.Service
+          const session = yield* sessions.create({ title: "Resume regression" })
+          const user = yield* sessions.updateMessage({
+            id: MessageID.ascending(),
+            role: "user",
+            sessionID: session.id,
+            agent: "build",
+            model: { providerID: ProviderV2.ID.make("test"), modelID: ModelV2.ID.make("test-model") },
+            time: { created: 1 },
+            system: "Preserve these instructions",
+            tools: { bash: false },
+          })
+          yield* sessions.updatePart({
+            id: PartID.ascending(),
+            sessionID: session.id,
+            messageID: user.id,
+            type: "text",
+            text: "Finish the task",
+          })
+          const assistant = yield* sessions.updateMessage({
+            id: MessageID.ascending(),
+            parentID: user.id,
+            role: "assistant",
+            sessionID: session.id,
+            mode: "build",
+            agent: "build",
+            cost: 0,
+            path: { cwd: directory, root: directory },
+            tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+            modelID: ModelV2.ID.make("test-model"),
+            providerID: ProviderV2.ID.make("test"),
+            time: { created: 2, ...(scenario === "unfinished stop" ? {} : { completed: 3 }) },
+            finish: scenario === "output limit" ? "length" : scenario === "provider error" ? undefined : "stop",
+            ...(scenario === "provider error"
+              ? { error: { name: "UnknownError" as const, data: { message: "Disconnected" } } }
+              : {}),
+          })
+          yield* sessions.updatePart({
+            id: PartID.ascending(),
+            sessionID: session.id,
+            messageID: assistant.id,
+            type: "text",
+            text: "Partial work",
+          })
+          return { session, before: yield* sessions.messages({ sessionID: session.id }) }
+        }).pipe(provideInstanceEffect(directory))
+        const response = yield* request(
+          `${pathFor(SessionPaths.resumeAsync, { sessionID: seeded.session.id })}?directory=${encodeURIComponent(directory)}`,
+          { method: "POST" },
+        )
+        expect(response.status).toBe(204)
+        if (scenario !== "completed") yield* llm.wait(1)
+        const messages = yield* pollWithTimeout(
+          Session.use.messages({ sessionID: seeded.session.id }).pipe(
+            provideInstanceEffect(directory),
+            Effect.map((messages) => {
+              const newest = messages.at(-1)
+              return scenario === "completed" ||
+                (newest?.info.role === "assistant" &&
+                  newest.info.time.completed &&
+                  newest.info.id !== seeded.before.at(-1)?.info.id)
+                ? messages
+                : undefined
+            }),
+          ),
+          "Resume never completed",
+        )
+        expect(messages.filter((message) => message.info.role === "user")).toHaveLength(1)
+        expect(messages.find((message) => message.info.role === "user")).toMatchObject(
+          seeded.before.find((message) => message.info.role === "user")!,
+        )
+        if (scenario === "completed") expect(messages).toEqual(seeded.before)
+        else expect(messages.at(-1)?.parts).toContainEqual(expect.objectContaining({ type: "text", text: "Recovered" }))
+      }).pipe(Effect.provide(TestLLMServer.layer), Effect.provide(AppNodeBuilder.build(CrossSpawnSpawner.node))),
+    )
+  }
+
+  it.live("returns control after each output limit, including explicit resumes", () =>
+    Effect.gen(function* () {
+      const llm = yield* TestLLMServer
+      for (let attempt = 0; attempt < 2; attempt++) {
+        yield* llm.push(
+          raw({
+            chunks: [
+              { id: "limited", choices: [{ delta: { role: "assistant", content: "Partial" } }] },
+              { id: "limited", choices: [{ delta: {}, finish_reason: "length" }] },
+            ],
+          }),
+        )
+      }
+      const directory = yield* tmpdirScoped({ git: true, config: testProviderConfig(llm.url) })
+      const session = yield* createSession({ title: "Output limit regression" }).pipe(provideInstanceEffect(directory))
+      const query = `?directory=${encodeURIComponent(directory)}`
+      const first = yield* requestJson<SessionV1.WithParts>(
+        pathFor(SessionPaths.prompt, { sessionID: session.id }) + query,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            agent: "build",
+            model: { providerID: "test", modelID: "test-model" },
+            parts: [{ type: "text", text: "Finish the task" }],
+          }),
+        },
+      )
+      expect(first.info).toMatchObject({ role: "assistant", finish: "length" })
+      expect(yield* llm.calls).toBe(1)
+      expect(
+        (yield* request(pathFor(SessionPaths.resumeAsync, { sessionID: session.id }) + query, { method: "POST" }))
+          .status,
+      ).toBe(204)
+      yield* llm.wait(2)
+      yield* pollWithTimeout(
+        requestJson<Record<string, { type: string }>>(SessionPaths.status + query).pipe(
+          Effect.map((statuses) => (statuses[session.id]?.type !== "busy" ? true : undefined)),
+        ),
+        "Output-limited resume never returned control",
+      )
+      expect(yield* llm.calls).toBe(2)
+      const messages = yield* Session.use.messages({ sessionID: session.id }).pipe(provideInstanceEffect(directory))
+      expect(messages.filter((message) => message.info.role === "user")).toHaveLength(1)
+      expect(messages.at(-1)?.info).toMatchObject({ role: "assistant", finish: "length" })
+    }).pipe(Effect.provide(TestLLMServer.layer), Effect.provide(AppNodeBuilder.build(CrossSpawnSpawner.node))),
   )
 
   it.live("uses the persisted session directory for prompt requests", () =>

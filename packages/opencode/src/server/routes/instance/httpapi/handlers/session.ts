@@ -328,6 +328,22 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       return HttpApiSchema.NoContent.make()
     })
 
+    const resumeAsync = Effect.fn("SessionHttpApi.resumeAsync")(function* (ctx: { params: { sessionID: SessionID } }) {
+      yield* requireSession(ctx.params.sessionID)
+      const messages = yield* SessionError.mapStorageNotFound(session.messages({ sessionID: ctx.params.sessionID }))
+      if (!messages.some((message) => message.info.role === "user")) return yield* new HttpApiError.BadRequest({})
+      yield* promptSvc.loop({ sessionID: ctx.params.sessionID }).pipe(
+        Effect.catchCause((cause) =>
+          events.publish(Session.Event.Error, {
+            sessionID: ctx.params.sessionID,
+            error: new NamedError.Unknown({ message: Cause.pretty(cause) }).toObject(),
+          }),
+        ),
+        Effect.forkIn(scope, { startImmediately: true }),
+      )
+      return HttpApiSchema.NoContent.make()
+    })
+
     const command = Effect.fn("SessionHttpApi.command")(function* (ctx: {
       params: { sessionID: SessionID }
       payload: typeof CommandPayload.Type
@@ -430,6 +446,7 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       .handle("summarize", summarize)
       .handle("prompt", prompt)
       .handle("promptAsync", promptAsync)
+      .handle("resumeAsync", resumeAsync)
       .handle("command", command)
       .handle("shell", shell)
       .handle("revert", revert)

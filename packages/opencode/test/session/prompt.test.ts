@@ -403,7 +403,7 @@ const seed = Effect.fn("test.seed")(function* (sessionID: SessionID, opts?: { fi
     tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
     modelID: ref.modelID,
     providerID: ref.providerID,
-    time: { created: Date.now() },
+    time: { created: Date.now(), ...(opts?.finish === "stop" ? { completed: Date.now() } : {}) },
     ...(opts?.finish ? { finish: opts.finish } : {}),
   }
   yield* session.updateMessage(assistant)

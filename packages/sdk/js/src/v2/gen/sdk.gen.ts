@@ -205,6 +205,8 @@ import type {
   SessionPromptAsyncResponses,
   SessionPromptErrors,
   SessionPromptResponses,
+  SessionResumeAsyncErrors,
+  SessionResumeAsyncResponses,
   SessionRevertErrors,
   SessionRevertResponses,
   SessionShareErrors,
@@ -4144,6 +4146,38 @@ export class Session2 extends HeyApiClient {
         ...options?.headers,
         ...params.headers,
       },
+    })
+  }
+
+  /**
+   * Resume an existing turn
+   *
+   * Continue the existing session asynchronously without creating or updating a user message.
+   */
+  public resumeAsync<ThrowOnError extends boolean = false>(
+    parameters: {
+      sessionID: string
+      directory?: string
+      workspace?: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "path", key: "sessionID" },
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).post<SessionResumeAsyncResponses, SessionResumeAsyncErrors, ThrowOnError>({
+      url: "/session/{sessionID}/resume_async",
+      ...options,
+      ...params,
     })
   }
 

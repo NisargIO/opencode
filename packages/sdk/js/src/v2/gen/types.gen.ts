@@ -10190,6 +10190,40 @@ export type SessionPromptAsyncResponses = {
 
 export type SessionPromptAsyncResponse = SessionPromptAsyncResponses[keyof SessionPromptAsyncResponses]
 
+export type SessionResumeAsyncData = {
+  body?: never
+  path: {
+    sessionID: string
+  }
+  query?: {
+    directory?: string
+    workspace?: string
+  }
+  url: "/session/{sessionID}/resume_async"
+}
+
+export type SessionResumeAsyncErrors = {
+  /**
+   * BadRequest | InvalidRequestError
+   */
+  400: EffectHttpApiErrorBadRequest | InvalidRequestError
+  /**
+   * NotFoundError
+   */
+  404: NotFoundError
+}
+
+export type SessionResumeAsyncError = SessionResumeAsyncErrors[keyof SessionResumeAsyncErrors]
+
+export type SessionResumeAsyncResponses = {
+  /**
+   * Continuation accepted
+   */
+  204: void
+}
+
+export type SessionResumeAsyncResponse = SessionResumeAsyncResponses[keyof SessionResumeAsyncResponses]
+
 export type SessionCommandData = {
   body?: {
     messageID?: string
