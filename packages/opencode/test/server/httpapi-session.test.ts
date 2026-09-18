@@ -34,7 +34,7 @@ import * as DateTime from "effect/DateTime"
 import { eq } from "drizzle-orm"
 import { resetDatabase } from "../fixture/db"
 import { disposeAllInstances, provideInstanceEffect, TestInstance, tmpdirScoped } from "../fixture/fixture"
-import { TestLLMServer } from "../lib/llm-server"
+import { raw, TestLLMServer } from "../lib/llm-server"
 import { testProviderConfig } from "../lib/test-provider"
 import { pollWithTimeout, testEffect } from "../lib/effect"
 
@@ -471,6 +471,54 @@ describe("session HttpApi", () => {
       }).pipe(Effect.provide(TestLLMServer.layer), Effect.provide(AppNodeBuilder.build(CrossSpawnSpawner.node))),
     )
   }
+
+  it.live("returns control after each output limit, including explicit resumes", () =>
+    Effect.gen(function* () {
+      const llm = yield* TestLLMServer
+      for (let attempt = 0; attempt < 2; attempt++) {
+        yield* llm.push(
+          raw({
+            chunks: [
+              { id: "limited", choices: [{ delta: { role: "assistant", content: "Partial" } }] },
+              { id: "limited", choices: [{ delta: {}, finish_reason: "length" }] },
+            ],
+          }),
+        )
+      }
+      const directory = yield* tmpdirScoped({ git: true, config: testProviderConfig(llm.url) })
+      const session = yield* createSession({ title: "Output limit regression" }).pipe(provideInstanceEffect(directory))
+      const query = `?directory=${encodeURIComponent(directory)}`
+      const first = yield* requestJson<SessionV1.WithParts>(
+        pathFor(SessionPaths.prompt, { sessionID: session.id }) + query,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            agent: "build",
+            model: { providerID: "test", modelID: "test-model" },
+            parts: [{ type: "text", text: "Finish the task" }],
+          }),
+        },
+      )
+      expect(first.info).toMatchObject({ role: "assistant", finish: "length" })
+      expect(yield* llm.calls).toBe(1)
+      expect(
+        (yield* request(pathFor(SessionPaths.resumeAsync, { sessionID: session.id }) + query, { method: "POST" }))
+          .status,
+      ).toBe(204)
+      yield* llm.wait(2)
+      yield* pollWithTimeout(
+        requestJson<Record<string, { type: string }>>(SessionPaths.status + query).pipe(
+          Effect.map((statuses) => (statuses[session.id]?.type !== "busy" ? true : undefined)),
+        ),
+        "Output-limited resume never returned control",
+      )
+      expect(yield* llm.calls).toBe(2)
+      const messages = yield* Session.use.messages({ sessionID: session.id }).pipe(provideInstanceEffect(directory))
+      expect(messages.filter((message) => message.info.role === "user")).toHaveLength(1)
+      expect(messages.at(-1)?.info).toMatchObject({ role: "assistant", finish: "length" })
+    }).pipe(Effect.provide(TestLLMServer.layer), Effect.provide(AppNodeBuilder.build(CrossSpawnSpawner.node))),
+  )
 
   it.live("uses the persisted session directory for prompt requests", () =>
     Effect.gen(function* () {

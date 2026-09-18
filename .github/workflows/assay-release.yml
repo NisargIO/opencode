@@ -1,8 +1,12 @@
 name: Assay OpenCode release
 on:
-  push:
-    branches: [session-resume]
   workflow_dispatch:
+    inputs:
+      version:
+        description: Unpublished version to build and release
+        required: true
+        default: 1.18.31-assay.2
+        type: string
 permissions:
   contents: read
 jobs:
@@ -11,6 +15,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    env:
+      OPENCODE_VERSION: ${{ inputs.version }}
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
@@ -19,8 +25,6 @@ jobs:
       - run: bunx @antfu/ni --frozen-lockfile
       - run: bunx --package @antfu/ni nr build --single --baseline --skip-install
         working-directory: packages/opencode
-        env:
-          OPENCODE_VERSION: 1.18.31-assay.1
       - run: bunx --package @antfu/ni nr typecheck
         working-directory: packages/opencode
       - run: bunx --package @antfu/ni nr test test/server/httpapi-session.test.ts test/session/prompt.test.ts
@@ -33,4 +37,4 @@ jobs:
       - name: Publish the sandbox dependency
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create v1.18.31-assay.1 opencode-linux-x64.tar.gz opencode-linux-x64-baseline.tar.gz SHA256SUMS --target "$GITHUB_SHA" --title "OpenCode 1.18.31 with native session resume" --notes "Pinned Assay build. Adds POST /session/:sessionID/resume_async without rewriting user messages."
+        run: gh release create "v$OPENCODE_VERSION" opencode-linux-x64.tar.gz opencode-linux-x64-baseline.tar.gz SHA256SUMS --target "$GITHUB_SHA" --title "OpenCode $OPENCODE_VERSION with native session resume" --notes "Pinned Assay build. Adds POST /session/:sessionID/resume_async without rewriting user messages."
